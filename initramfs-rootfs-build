@@ -15,14 +15,22 @@
 # 用法:
 #   initramfs-rootfs-build <内核构建产物目录> [选项] [profile ...]
 #
-# 选项:
-#   openeuler    openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile
-#   openruyi     openruyi 的 rva20 + rva23 两个 profile
-#   all          上面全部 4 个 profile
+# 选项(可多个、自动去重):
+#   openeuler-rva20   openEuler 24.03 LTS SP3 riscv64 rva20
+#   openeuler-rva23   openEuler 24.03 LTS SP3 riscv64 rva23
+#   openruyi-rva20    openruyi rva20
+#   openruyi-rva23    openruyi rva23
+#
+# 也可以直接指定完整 profile 名:
+#   openEuler-24.03-LTS-SP3-RVA20 / openEuler-24.03-LTS-SP3-RVA23 /
+#   openruyi-rva20 / openruyi-rva23
 #
 # 缺省(不传选项时)按容器发行版选择:
-#   openeuler 镜像 → openEuler 的 rva20 + rva23
-#   openruyi  镜像 → openruyi 的 rva20 + rva23
+#   openeuler 镜像 → openeuler-rva20 + openeuler-rva23
+#   openruyi  镜像 → openruyi-rva20 + openruyi-rva23
+#
+# 调试(环境变量, 不占命令行参数):
+#   export debug=true   开启 shell xtrace (打印每条执行的命令及行号), 用于排查构建失败
 #
 # 也可以直接指定具体 profile:
 #   openEuler-24.03-LTS-SP3-RVA20    openEuler 24.03 LTS SP3 rva20
@@ -31,10 +39,10 @@
 #   openruyi-rva23                   openruyi rva23
 #
 # 输出 (/srv/initramfs_rootfs_result):
-#   <commit>/<profile>/initramfs.img                initramfs 及其 md5sum
-#   <commit>/<profile>/<profile>-rootfs.img.zst    ext4 镜像 zstd 压缩及 md5sum
-#   <commit>/<profile>/<profile>-rootfs.tar.gz     rootfs 压缩包及 md5sum
-#   (rootfs 内含配套内核模块)
+#   <commit>/<profile>/initramfs/initramfs.img              initramfs 及其 md5sum
+#   <commit>/<profile>/rootfs/<profile>-rootfs.img.zst     ext4 镜像 zstd 压缩及 md5sum
+#   <commit>/<profile>/rootfs/<profile>-rootfs.tar.gz      rootfs 压缩包及 md5sum
+#   (initramfs 与 rootfs 产物分目录存放, rootfs 内含配套内核模块)
 #
 # 运行要求:
 #   - 容器需 --privileged (bind 挂载 proc/sys/dev、loop 挂载制作 ext4 镜像)
@@ -42,6 +50,12 @@
 #     例如: docker run --privileged --rm tonistiigi/binfmt --install riscv64
 
 set -euo pipefail
+
+# 调试模式: export debug=true 开启 shell xtrace, 打印每条执行的命令及行号
+if [ "${debug:-}" = "true" ]; then
+    PS4='+ [${BASH_SOURCE##*/}:${LINENO}] '
+    set -x
+fi
 
 RESULT_PATH=/srv/initramfs_rootfs_result
 ALL_PROFILES=(
@@ -110,12 +124,14 @@ usage() {
 内核构建产物目录: guix-kernel-cross-build 产物
   (含 Image、lib/modules/<kver>、lib/dtb)
 
-选项 (选项和具体 profile 可混用、可多个):
-  openeuler    openEuler 24.03 LTS SP3 rva20 + rva23
-  openruyi     openruyi rva20 + rva23
-  all          全部 4 个 profile
+选项 (可多个、自动去重):
+  openeuler-rva20    openEuler 24.03 LTS SP3 riscv64 rva20
+  openeuler-rva23    openEuler 24.03 LTS SP3 riscv64 rva23
+  openruyi-rva20     openruyi rva20
+  openruyi-rva23     openruyi rva23
 
-缺省按容器发行版选择 (openeuler 镜像 → openEuler, openruyi 镜像 → openruyi)
+缺省按容器发行版选择 (openeuler 镜像 → openeuler-rva20+rva23,
+openruyi 镜像 → openruyi-rva20+rva23)
 
 具体 profile:
 EOF
@@ -367,7 +383,9 @@ build_profile() {
     load_profile "$1"
 
     local profile_out="${OUT_ROOT}/${PROFILE_NAME}"
-    local rootfs_dir="${profile_out}/rootfs"
+    local initramfs_out="${profile_out}/initramfs"
+    local rootfs_out="${profile_out}/rootfs"
+    local rootfs_dir="${profile_out}/.work"
 
     echo ""
     echo "=========================================="
@@ -375,6 +393,7 @@ build_profile() {
     echo "=========================================="
 
     rm -rf "${profile_out}"
+    mkdir -p "${initramfs_out}" "${rootfs_out}"
     mkdir -p "${rootfs_dir}"/{dev,proc,sys,run,etc/yum.repos.d,root,lib/modules}
 
     CURRENT_ROOTFS_DIR="${rootfs_dir}"
@@ -385,8 +404,8 @@ build_profile() {
 
     echo "[2/5] 生成 initramfs..."
     create_initramfs "${rootfs_dir}"
-    cp "${rootfs_dir}/root/initramfs.img" "${rootfs_dir}/root/initramfs.img.md5sum" "${profile_out}/"
-    chmod 0644 "${profile_out}/initramfs.img"
+    cp "${rootfs_dir}/root/initramfs.img" "${rootfs_dir}/root/initramfs.img.md5sum" "${initramfs_out}/"
+    chmod 0644 "${initramfs_out}/initramfs.img"
 
     echo "[3/5] 配置并清理 rootfs..."
     configure_rootfs "${rootfs_dir}"
@@ -395,7 +414,7 @@ build_profile() {
     CURRENT_ROOTFS_DIR=""
 
     echo "[4/5] 打包 rootfs 产物 (img.zst / tar.gz)..."
-    package_rootfs "${rootfs_dir}" "${profile_out}"
+    package_rootfs "${rootfs_dir}" "${rootfs_out}"
 
     echo "[5/5] 清理 rootfs 工作目录..."
     rm -rf "${rootfs_dir}"
@@ -413,17 +432,19 @@ if [ -z "${ARTIFACT_DIR}" ] || [ ! -d "${ARTIFACT_DIR}" ]; then
 fi
 shift
 
-# 展开选项参数为具体 profile 列表
-#   openeuler → openEuler 两个 profile
-#   openruyi  → openruyi 两个 profile
-#   all       → 全部 4 个
+# 展开选项参数为具体 profile:
+#   openeuler-rva20 → openEuler 24.03 LTS SP3 riscv64 rva20
+#   openeuler-rva23 → openEuler 24.03 LTS SP3 riscv64 rva23
+#   openruyi-rva20  → openruyi rva20
+#   openruyi-rva23  → openruyi rva23
 expand_profiles() {
     local arg="$1"
     case "${arg,,}" in
-        all)       echo "${ALL_PROFILES[@]}" ;;
-        openeuler) echo "${OPENEULER_PROFILES[@]}" ;;
-        openruyi)  echo "${OPENRUYI_PROFILES[@]}" ;;
-        *)         echo "${arg}" ;;
+        openeuler-rva20) echo "openEuler-24.03-LTS-SP3-RVA20" ;;
+        openeuler-rva23) echo "openEuler-24.03-LTS-SP3-RVA23" ;;
+        openruyi-rva20)  echo "openruyi-rva20" ;;
+        openruyi-rva23)  echo "openruyi-rva23" ;;
+        *)               echo "${arg}" ;;
     esac
 }
 
@@ -469,7 +490,7 @@ else
             PROFILES=("${OPENRUYI_PROFILES[@]}")
             ;;
         *)
-            echo "错误: 无法识别容器发行版 '${os_id}', 请显式指定 profile (openeuler/openruyi/all)"
+            echo "错误: 无法识别容器发行版 '${os_id}', 请显式指定 profile (openeuler-rva20/openeuler-rva23/openruyi-rva20/openruyi-rva23)"
             usage
             exit 1
             ;;

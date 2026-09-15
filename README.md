@@ -17,9 +17,9 @@ lib/dtb/        # 设备树(保留 vendor 子目录)
 本仓库产出:
 
 ```
-/srv/initramfs_rootfs_result/<commit>/<profile>/initramfs.img       # initramfs
-/srv/initramfs_rootfs_result/<commit>/<profile>/<profile>-rootfs.img.zst
-/srv/initramfs_rootfs_result/<commit>/<profile>/<profile>-rootfs.tar.gz
+/srv/initramfs_rootfs_result/<commit>/<profile>/initramfs/initramfs.img    # initramfs
+/srv/initramfs_rootfs_result/<commit>/<profile>/rootfs/<profile>-rootfs.img.zst
+/srv/initramfs_rootfs_result/<commit>/<profile>/rootfs/<profile>-rootfs.tar.gz
 ```
 
 ## 镜像
@@ -51,15 +51,30 @@ initramfs-rootfs-build <内核构建产物目录> [选项] [profile ...]
 | 参数 | 说明 |
 |---|---|
 | `<内核构建产物目录>` | guix-kernel-cross-build 的构建产物目录,须含 `Image` 和 `lib/modules/<kver>`(有且只有一个内核版本) |
-| `openeuler` | openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile |
-| `openruyi` | openruyi 的 rva20 + rva23 两个 profile |
-| `all` | 全部 4 个 profile |
-| 具体 profile | `openEuler-24.03-LTS-SP3-RVA20` / `openEuler-24.03-LTS-SP3-RVA23` / `openruyi-rva20` / `openruyi-rva23` |
+| `openeuler-rva20` | openEuler 24.03 LTS SP3 riscv64 rva20 |
+| `openeuler-rva23` | openEuler 24.03 LTS SP3 riscv64 rva23 |
+| `openruyi-rva20` | openruyi rva20 |
+| `openruyi-rva23` | openruyi rva23 |
 
-不传选项时**按容器发行版选择**:`openeuler-*` 镜像里构建 openEuler 的
-rootfs,`openruyi-*` 镜像里构建 openruyi 的 rootfs;无法识别发行版时需显式指定。
+不传选项时**按容器发行版选择**:`openeuler-*` 镜像构建 `openeuler-rva20` +
+`openeuler-rva23`,`openruyi-*` 镜像构建 `openruyi-rva20` + `openruyi-rva23`;
+无法识别发行版时需显式指定。
 
-选项和具体 profile 可混用、可多个,自动去重;不支持的 profile 会报错退出。
+选项可多个、自动去重;也可直接指定完整 profile 名
+(`openEuler-24.03-LTS-SP3-RVA20` 等),不支持的会报错退出。
+
+### 调试
+
+环境变量 `debug=true` 开启调试:脚本以 shell xtrace 模式运行,日志中打印
+每条执行的命令及其行号,便于排查构建失败发生在哪一步:
+
+```bash
+# 容器内
+debug=true initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
+
+# docker run 时
+docker run --privileged --rm -e debug=true ...
+```
 
 ## 运行
 
@@ -84,14 +99,14 @@ docker run --privileged --rm \
     -v /srv/guix_result:/srv/guix_result \
     -v /srv/initramfs_rootfs_result:/srv/initramfs_rootfs_result \
     hub.oepkgs.net/rvci/rava-initramfs-rootfs-build:openeuler-dev \
-    initramfs-rootfs-build /srv/guix_result/<commit> all
+    initramfs-rootfs-build /srv/guix_result/<commit> openeuler-rva23
 
 # 也可以进容器交互执行
 docker run -ti --privileged \
     -v /srv/guix_result:/srv/guix_result \
     -v /srv/initramfs_rootfs_result:/srv/initramfs_rootfs_result \
     hub.oepkgs.net/rvci/rava-initramfs-rootfs-build:openruyi-dev bash
-initramfs-rootfs-build /srv/guix_result/<commit> openeuler > build.log 2>&1
+initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23 > build.log 2>&1
 
 # 只构建单个 profile
 initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
@@ -129,15 +144,18 @@ initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
 
 ## 构建产物
 
-构建完毕后产物存放在 `/srv/initramfs_rootfs_result/<commit>/<profile>/` 下:
+构建完毕后产物存放在 `/srv/initramfs_rootfs_result/<commit>/<profile>/` 下,
+initramfs 与 rootfs 分目录存放:
 
 ```
-initramfs.img                      # initramfs(dracut 生成)
-initramfs.img.md5sum               # initramfs.img 的 md5 校验
-<profile>-rootfs.img.zst           # ext4 镜像 zstd 压缩(rootfs 大小 + 5GB 预留)
-<profile>-rootfs.img.zst.md5sum    # img.zst 的 md5 校验
-<profile>-rootfs.tar.gz            # rootfs 目录 tar.gz 压缩包
-<profile>-rootfs.tar.gz.md5sum     # tar.gz 的 md5 校验
+initramfs/
+  initramfs.img                      # initramfs(dracut 生成)
+  initramfs.img.md5sum               # initramfs.img 的 md5 校验
+rootfs/
+  <profile>-rootfs.img.zst           # ext4 镜像 zstd 压缩(rootfs 大小 + 5GB 预留)
+  <profile>-rootfs.img.zst.md5sum    # img.zst 的 md5 校验
+  <profile>-rootfs.tar.gz            # rootfs 目录 tar.gz 压缩包
+  <profile>-rootfs.tar.gz.md5sum     # tar.gz 的 md5 校验
 ```
 
 rootfs 由制作 initramfs 的 chroot 环境打包而来,**内含配套的内核模块**
