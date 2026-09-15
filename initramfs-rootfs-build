@@ -13,7 +13,7 @@
 #      (ext4 镜像 zstd 压缩 + tar.gz)
 #
 # 用法:
-#   initramfs-build <内核构建产物目录> [选项] [profile ...]
+#   initramfs-rootfs-build <内核构建产物目录> [选项] [profile ...]
 #
 # 选项:
 #   openeuler    openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile

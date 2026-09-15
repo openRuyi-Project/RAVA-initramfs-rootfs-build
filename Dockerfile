@@ -22,5 +22,5 @@ RUN dnf makecache && \
 RUN mkdir /srv/initramfs_result
 
 # copy script
-COPY initramfs-build /usr/bin/initramfs-build
-RUN chmod +x /usr/bin/initramfs-build
+COPY initramfs-rootfs-build /usr/bin/initramfs-rootfs-build
+RUN chmod +x /usr/bin/initramfs-rootfs-build

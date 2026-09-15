@@ -45,7 +45,7 @@ base image 由 matrix 决定:
 ## 用法
 
 ```bash
-initramfs-build <内核构建产物目录> [选项] [profile ...]
+initramfs-rootfs-build <内核构建产物目录> [选项] [profile ...]
 ```
 
 | 参数 | 说明 |
@@ -72,17 +72,17 @@ docker run --privileged --rm \
     -v /srv/guix_result:/srv/guix_result \
     -v /srv/initramfs_result:/srv/initramfs_result \
     hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build:openeuler-dev \
-    initramfs-build /srv/guix_result/<commit> all
+    initramfs-rootfs-build /srv/guix_result/<commit> all
 
 # 也可以进容器交互执行
 docker run -ti --privileged \
     -v /srv/guix_result:/srv/guix_result \
     -v /srv/initramfs_result:/srv/initramfs_result \
     hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build:openruyi-dev bash
-initramfs-build /srv/guix_result/<commit> openeuler > build.log 2>&1
+initramfs-rootfs-build /srv/guix_result/<commit> openeuler > build.log 2>&1
 
 # 只构建单个 profile
-initramfs-build /srv/guix_result/<commit> openruyi-rva23
+initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
 ```
 
 ## 流程
