@@ -116,8 +116,8 @@ initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
 
 对每个 profile 执行:
 
-1. **安装目标系统**:在输出目录下的 `rootfs/` 工作目录里,用
-   `dnf --forcearch riscv64 --installroot` 安装对应发行版
+1. **安装目标系统**:在 mktemp 临时目录(容器本地 `/tmp`,可用 `TMPDIR`
+   重定向)里,用 `dnf --forcearch riscv64 --installroot` 安装对应发行版
    (openEuler: `minimal-environment` 环境组;openruyi: `openruyi-minimal` 包),
    附加 `dracut`、`dracut-network`、`nfs-utils`/`nfs-client`、
    `systemd-timesyncd` 等;openruyi 另做 `libudev-zero` → `systemd-udev` 替换
@@ -131,7 +131,8 @@ initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
    `img.zst`,目录打包为 `tar.gz`,均生成 md5sum 校验文件
 5. **清理** rootfs 工作目录,只保留打包产物
 
-失败即退出,EXIT trap 兜底 umount 当前 chroot 的挂载、清理临时镜像文件。
+失败即退出,EXIT trap 兜底 umount 当前 chroot 的挂载、清理临时镜像文件和
+mktemp 工作目录(先 umount 再删,避免透过 bind 的 `/dev` 误删宿主机文件)。
 
 ## profile 与软件源
 

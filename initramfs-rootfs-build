@@ -41,8 +41,11 @@
 # 输出 (/srv/initramfs_rootfs_result):
 #   <commit>/<profile>/initramfs/initramfs.img              initramfs 及其 md5sum
 #   <commit>/<profile>/rootfs/<profile>-rootfs.img.zst     ext4 镜像 zstd 压缩及 md5sum
-#   <commit>/<profile>/rootfs/<profile>-rootfs.tar.gz      rootfs 压缩包及 md5sum
+#   <commit>/<profile>/rootfs/<profile>-rootfs.tar.gz       rootfs 压缩包及 md5sum
 #   (initramfs 与 rootfs 产物分目录存放, rootfs 内含配套内核模块)
+#
+# rootfs 工作目录用 mktemp 建在容器本地(/tmp, 可用 TMPDIR 重定向),
+# 不在挂载的输出目录里做 dnf 安装等重 IO; 构建完成或失败时都会清理
 #
 # 运行要求:
 #   - 容器需 --privileged (bind 挂载 proc/sys/dev、loop 挂载制作 ext4 镜像)
@@ -92,6 +95,7 @@ DRACUT_ADD_DRIVERS=""
 
 # 挂载/临时文件状态(cleanup 用)
 CURRENT_ROOTFS_DIR=""
+ROOTFS_WORK_DIR=""
 TEMP_IMG=""
 TEMP_MOUNT_DIR=""
 
@@ -156,6 +160,17 @@ cleanup() {
     if [ -n "${TEMP_IMG}" ]; then
         rm -f "${TEMP_IMG}"
         TEMP_IMG=""
+    fi
+    # 构建中途失败时清理 mktemp 工作目录:
+    # 必须先 umount 再 rm -rf, 否则挂载还挂着时会透过 bind 的 /dev 删到宿主机文件
+    # (成功路径在 [5/5] 清理并清空该变量, 这里不会重复执行)
+    if [ -n "${ROOTFS_WORK_DIR}" ] && [ -d "${ROOTFS_WORK_DIR}" ]; then
+        local m
+        for m in dev/pts dev/shm dev proc sys run; do
+            umount "${ROOTFS_WORK_DIR}/${m}" 2>/dev/null || true
+        done
+        rm -rf "${ROOTFS_WORK_DIR}"
+        ROOTFS_WORK_DIR=""
     fi
 }
 trap cleanup EXIT
@@ -385,7 +400,11 @@ build_profile() {
     local profile_out="${OUT_ROOT}/${PROFILE_NAME}"
     local initramfs_out="${profile_out}/initramfs"
     local rootfs_out="${profile_out}/rootfs"
-    local rootfs_dir="${profile_out}/.work"
+    # 工作目录用 mktemp 建在容器本地(/tmp, 可用 TMPDIR 重定向),
+    # 不在挂载的输出目录里做 dnf 安装等重 IO, 输出目录只存最终产物;
+    # 失败时由 EXIT trap 兜底清理(cleanup)
+    ROOTFS_WORK_DIR=$(mktemp -d -t initramfs-rootfs.XXXXXX)
+    local rootfs_dir="${ROOTFS_WORK_DIR}"
 
     echo ""
     echo "=========================================="
@@ -418,6 +437,7 @@ build_profile() {
 
     echo "[5/5] 清理 rootfs 工作目录..."
     rm -rf "${rootfs_dir}"
+    ROOTFS_WORK_DIR=""
 }
 
 # ============================================================================
