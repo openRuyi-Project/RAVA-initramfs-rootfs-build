@@ -225,7 +225,9 @@ load_profile() {
 mount_chroot() {
     local rootfs_dir="$1"
 
-    mkdir -p "${rootfs_dir}"/dev/pts "${rootfs_dir}"/dev/shm
+    # 只预创建挂载点; dev/pts、dev/shm 经由 /dev 的 bind 挂载已经存在,
+    # 其余目录(含 dnf 安装后的 /lib → usr/lib 符号链接)都由包管理器建立
+    mkdir -p "${rootfs_dir}"/{dev,proc,sys,run}
     mount --bind /dev "${rootfs_dir}/dev"
     mount --bind /dev/pts "${rootfs_dir}/dev/pts"
     mount --bind /dev/shm "${rootfs_dir}/dev/shm"
@@ -413,7 +415,6 @@ build_profile() {
 
     rm -rf "${profile_out}"
     mkdir -p "${initramfs_out}" "${rootfs_out}"
-    mkdir -p "${rootfs_dir}"/{dev,proc,sys,run,etc/yum.repos.d,root,lib/modules}
 
     CURRENT_ROOTFS_DIR="${rootfs_dir}"
 
