@@ -453,6 +453,14 @@ else
     PROFILES=("${ALL_PROFILES[@]}")
 fi
 
+# 检查 riscv64 的 binfmt_misc 是否已注册(chroot 内执行目标架构程序的前提;
+# 注册信息在宿主机内核里, 容器内通过 /proc 可见)
+if ! ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -q 'riscv64'; then
+    echo "错误: 宿主机未注册 riscv64 的 binfmt_misc, 无法在 chroot 内执行 riscv64 程序"
+    echo "请先在宿主机执行: docker run --privileged --rm tonistiigi/binfmt --install riscv64"
+    exit 1
+fi
+
 # 校验构建产物目录
 if [ ! -f "${ARTIFACT_DIR}/Image" ]; then
     echo "错误: ${ARTIFACT_DIR}/Image 不存在"
