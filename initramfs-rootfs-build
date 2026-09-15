@@ -207,7 +207,8 @@ load_profile() {
             RELEASEVER=""
             INSTALL_MODE="package"
             INSTALL_TARGET="openruyi-minimal"
-            EXTRA_PACKAGES="systemd-timesyncd systemd libseccomp NetworkManager dracut dracut-network nfs-client"
+            # openruyi 的 dracut 已包含 dracut-network, 无需单独安装
+            EXTRA_PACKAGES="systemd-timesyncd systemd libseccomp NetworkManager dracut nfs-client"
             DRACUT_ADD_DRIVERS=""
             ;;
         *)
