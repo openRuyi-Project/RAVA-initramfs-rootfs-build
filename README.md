@@ -17,15 +17,15 @@ lib/dtb/        # 设备树(保留 vendor 子目录)
 本仓库产出:
 
 ```
-/srv/initramfs_result/<commit>/<profile>/initramfs.img       # initramfs
-/srv/initramfs_result/<commit>/<profile>/<profile>-rootfs.img.zst
-/srv/initramfs_result/<commit>/<profile>/<profile>-rootfs.tar.gz
+/srv/initramfs_rootfs_result/<commit>/<profile>/initramfs.img       # initramfs
+/srv/initramfs_rootfs_result/<commit>/<profile>/<profile>-rootfs.img.zst
+/srv/initramfs_rootfs_result/<commit>/<profile>/<profile>-rootfs.tar.gz
 ```
 
 ## 镜像
 
 通过 GitHub Actions 流水线(`.github/workflows/docker-image.yml`)构建并推送到
-`hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build`,由推送的 tag 触发:
+`hub.oepkgs.net/rvci/rava-initramfs-rootfs-build`,由推送的 tag 触发:
 
 | 推送的 tag | 发布的镜像 tag |
 |---|---|
@@ -53,32 +53,44 @@ initramfs-rootfs-build <内核构建产物目录> [选项] [profile ...]
 | `<内核构建产物目录>` | guix-kernel-cross-build 的构建产物目录,须含 `Image` 和 `lib/modules/<kver>`(有且只有一个内核版本) |
 | `openeuler` | openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile |
 | `openruyi` | openruyi 的 rva20 + rva23 两个 profile |
-| `all` | 全部 4 个 profile(**缺省值**) |
+| `all` | 全部 4 个 profile |
 | 具体 profile | `openEuler-24.03-LTS-SP3-RVA20` / `openEuler-24.03-LTS-SP3-RVA23` / `openruyi-rva20` / `openruyi-rva23` |
+
+不传选项时**按容器发行版选择**:`openeuler-*` 镜像里构建 openEuler 的
+rootfs,`openruyi-*` 镜像里构建 openruyi 的 rootfs;无法识别发行版时需显式指定。
 
 选项和具体 profile 可混用、可多个,自动去重;不支持的 profile 会报错退出。
 
 ## 运行
 
 容器需 `--privileged`(bind 挂载 `/dev` `/proc` `/sys`、loop 挂载制作 ext4 镜像),
-且宿主机需注册 riscv64 的 `binfmt_misc`(chroot 内执行目标架构程序):
+且宿主机需注册 riscv64 的 `binfmt_misc`(chroot 内执行目标架构程序)。
+
+**执行前先在 docker 宿主机上确认 binfmt 已注册**(注意是在宿主机上查,不要在容器里查)——
+容器内 `/proc` 是新挂载的 procfs,`/proc/sys/fs/binfmt_misc` 的列表可能为空,
+不能以此判断宿主机的注册状态:
 
 ```bash
-# 注册 qemu-riscv64(宿主机上执行一次)
-docker run --privileged --rm tonistiigi/binfmt --install riscv64
+# 宿主机上执行, 应能看到 qemu-riscv64 条目
+ls /proc/sys/fs/binfmt_misc
 
+# 若没有, 注册一次(宿主机上执行)
+docker run --privileged --rm tonistiigi/binfmt --install riscv64
+```
+
+```bash
 # 运行构建
 docker run --privileged --rm \
     -v /srv/guix_result:/srv/guix_result \
-    -v /srv/initramfs_result:/srv/initramfs_result \
-    hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build:openeuler-dev \
+    -v /srv/initramfs_rootfs_result:/srv/initramfs_rootfs_result \
+    hub.oepkgs.net/rvci/rava-initramfs-rootfs-build:openeuler-dev \
     initramfs-rootfs-build /srv/guix_result/<commit> all
 
 # 也可以进容器交互执行
 docker run -ti --privileged \
     -v /srv/guix_result:/srv/guix_result \
-    -v /srv/initramfs_result:/srv/initramfs_result \
-    hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build:openruyi-dev bash
+    -v /srv/initramfs_rootfs_result:/srv/initramfs_rootfs_result \
+    hub.oepkgs.net/rvci/rava-initramfs-rootfs-build:openruyi-dev bash
 initramfs-rootfs-build /srv/guix_result/<commit> openeuler > build.log 2>&1
 
 # 只构建单个 profile
@@ -117,7 +129,7 @@ initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
 
 ## 构建产物
 
-构建完毕后产物存放在 `/srv/initramfs_result/<commit>/<profile>/` 下:
+构建完毕后产物存放在 `/srv/initramfs_rootfs_result/<commit>/<profile>/` 下:
 
 ```
 initramfs.img                      # initramfs(dracut 生成)

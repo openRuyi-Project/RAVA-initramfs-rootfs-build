@@ -19,7 +19,7 @@ RUN dnf makecache && \
     dnf clean all
 
 # create result dir
-RUN mkdir /srv/initramfs_result
+RUN mkdir /srv/initramfs_rootfs_result
 
 # copy script
 COPY initramfs-rootfs-build /usr/bin/initramfs-rootfs-build

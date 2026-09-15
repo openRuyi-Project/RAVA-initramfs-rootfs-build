@@ -10,7 +10,7 @@ name: Docker Image CI
 #     openeuler → openeuler/openeuler:24.03-lts-sp2
 #     openruyi  → git.openruyi.cn/openruyi/creek-x86-64:latest
 #
-#   最终镜像形如 hub.oepkgs.net/rvci/RAVA-initramfs-rootfs-build:openeuler-dev
+#   最终镜像形如 hub.oepkgs.net/rvci/rava-initramfs-rootfs-build:openeuler-dev
 
 on:
   push:
@@ -31,7 +31,7 @@ concurrency:
 
 env:
   REGISTRY: hub.oepkgs.net
-  IMAGE_NAME: rvci/RAVA-initramfs-rootfs-build
+  IMAGE_NAME: rvci/rava-initramfs-rootfs-build
 
 jobs:
   build:

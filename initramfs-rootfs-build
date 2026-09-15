@@ -18,7 +18,11 @@
 # 选项:
 #   openeuler    openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile
 #   openruyi     openruyi 的 rva20 + rva23 两个 profile
-#   all          上面全部 4 个 profile (缺省值)
+#   all          上面全部 4 个 profile
+#
+# 缺省(不传选项时)按容器发行版选择:
+#   openeuler 镜像 → openEuler 的 rva20 + rva23
+#   openruyi  镜像 → openruyi 的 rva20 + rva23
 #
 # 也可以直接指定具体 profile:
 #   openEuler-24.03-LTS-SP3-RVA20    openEuler 24.03 LTS SP3 rva20
@@ -26,7 +30,7 @@
 #   openruyi-rva20                   openruyi rva20
 #   openruyi-rva23                   openruyi rva23
 #
-# 输出 (/srv/initramfs_result):
+# 输出 (/srv/initramfs_rootfs_result):
 #   <commit>/<profile>/initramfs.img                initramfs 及其 md5sum
 #   <commit>/<profile>/<profile>-rootfs.img.zst    ext4 镜像 zstd 压缩及 md5sum
 #   <commit>/<profile>/<profile>-rootfs.tar.gz     rootfs 压缩包及 md5sum
@@ -39,7 +43,7 @@
 
 set -euo pipefail
 
-RESULT_PATH=/srv/initramfs_result
+RESULT_PATH=/srv/initramfs_rootfs_result
 ALL_PROFILES=(
     "openEuler-24.03-LTS-SP3-RVA20"
     "openEuler-24.03-LTS-SP3-RVA23"
@@ -109,7 +113,9 @@ usage() {
 选项 (选项和具体 profile 可混用、可多个):
   openeuler    openEuler 24.03 LTS SP3 rva20 + rva23
   openruyi     openruyi rva20 + rva23
-  all          全部 4 个 profile (缺省)
+  all          全部 4 个 profile
+
+缺省按容器发行版选择 (openeuler 镜像 → openEuler, openruyi 镜像 → openruyi)
 
 具体 profile:
 EOF
@@ -410,7 +416,7 @@ shift
 # 展开选项参数为具体 profile 列表
 #   openeuler → openEuler 两个 profile
 #   openruyi  → openruyi 两个 profile
-#   all       → 全部 4 个 (缺省)
+#   all       → 全部 4 个
 expand_profiles() {
     local arg="$1"
     case "${arg,,}" in
@@ -420,6 +426,10 @@ expand_profiles() {
         *)         echo "${arg}" ;;
     esac
 }
+
+# 读取容器发行版(镜像 tag 与发行版对应: openeuler 镜像做 openEuler rootfs,
+# openruyi 镜像做 openruyi rootfs)
+os_id=$(grep ^ID= /etc/os-release | cut -d'"' -f2)
 
 PROFILES=()
 if [ $# -gt 0 ]; then
@@ -450,15 +460,20 @@ if [ $# -gt 0 ]; then
         done
     done
 else
-    PROFILES=("${ALL_PROFILES[@]}")
-fi
-
-# 检查 riscv64 的 binfmt_misc 是否已注册(chroot 内执行目标架构程序的前提;
-# 注册信息在宿主机内核里, 容器内通过 /proc 可见)
-if ! ls /proc/sys/fs/binfmt_misc/ 2>/dev/null | grep -q 'riscv64'; then
-    echo "错误: 宿主机未注册 riscv64 的 binfmt_misc, 无法在 chroot 内执行 riscv64 程序"
-    echo "请先在宿主机执行: docker run --privileged --rm tonistiigi/binfmt --install riscv64"
-    exit 1
+    # 缺省按容器发行版选择
+    case "${os_id}" in
+        openEuler)
+            PROFILES=("${OPENEULER_PROFILES[@]}")
+            ;;
+        openruyi)
+            PROFILES=("${OPENRUYI_PROFILES[@]}")
+            ;;
+        *)
+            echo "错误: 无法识别容器发行版 '${os_id}', 请显式指定 profile (openeuler/openruyi/all)"
+            usage
+            exit 1
+            ;;
+    esac
 fi
 
 # 校验构建产物目录
