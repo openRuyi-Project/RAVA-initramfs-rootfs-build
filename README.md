@@ -121,7 +121,8 @@ initramfs-rootfs-build /srv/guix_result/<commit> openruyi-rva23
    (openEuler: `minimal-environment` 环境组;openruyi: `openruyi-minimal` 包),
    附加 `dracut`、`nfs-utils`/`nfs-client`、`systemd-timesyncd` 等
    (openEuler 另加 `dracut-network`;openruyi 的 `dracut` 已包含);
-   openruyi 另做 `libudev-zero` → `systemd-udev` 替换
+   openruyi 先做 `libudev-zero` → `systemd-udev` 替换再装额外包
+   (`dracut` 依赖 `systemd-udev`,与 `libudev-zero` 冲突)
 2. **生成 initramfs**:把内核模块 `rsync` 进 chroot 的 `lib/modules/<kver>`,
    chroot 内 `depmod` 后用 `dracut --no-hostonly --add " nfs network base "` 生成
    (openEuler rva23 附加 `--add-drivers k1-emac` 网卡驱动)

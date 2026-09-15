@@ -280,16 +280,9 @@ EOF
             "${INSTALL_TARGET}"
     fi
 
-    echo "[${PROFILE_NAME}] 安装额外软件包: ${EXTRA_PACKAGES}..."
-    # shellcheck disable=SC2086
-    retry 10 30 dnf install -y \
-        --disablerepo='*' --enablerepo="${REPO_ID}" \
-        --forcearch riscv64 --installroot "${rootfs_dir}" \
-        "${releasever_args[@]}" \
-        --nodocs \
-        ${EXTRA_PACKAGES}
-
-    # openruyi 需要(且仅当镜像内有 libudev-zero 时)替换为 systemd-udev
+    # openruyi 需要(且仅当镜像内有 libudev-zero 时)替换为 systemd-udev:
+    # 必须在装额外包之前做 -- 额外包里的 dracut 依赖 systemd-udev,
+    # 与 libudev-zero 冲突, 不先替换的话事务解不出来
     if [[ "${PROFILE_NAME}" == openruyi-* ]]; then
         if rpm --root "${rootfs_dir}" -q libudev-zero >/dev/null 2>&1; then
             echo "[${PROFILE_NAME}] 替换 libudev-zero 为 systemd-udev..."
@@ -299,6 +292,15 @@ EOF
                 libudev-zero systemd-udev
         fi
     fi
+
+    echo "[${PROFILE_NAME}] 安装额外软件包: ${EXTRA_PACKAGES}..."
+    # shellcheck disable=SC2086
+    retry 10 30 dnf install -y \
+        --disablerepo='*' --enablerepo="${REPO_ID}" \
+        --forcearch riscv64 --installroot "${rootfs_dir}" \
+        "${releasever_args[@]}" \
+        --nodocs \
+        ${EXTRA_PACKAGES}
 }
 
 create_initramfs() {
