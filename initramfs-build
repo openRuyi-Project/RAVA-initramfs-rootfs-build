@@ -1,0 +1,502 @@
+#!/bin/bash
+#
+# initramfs + rootfs 构建脚本
+#
+# 输入: guix-kernel-cross-build 的内核构建产物目录
+#       (/srv/guix_result/<commit>, 内含 Image、vmlinux、lib/modules/<kver>、
+#        lib/dtb/、<kver>.tgz)
+#
+# 流程:
+#   1. 用 dnf --forcearch riscv64 在本地目录搭建发行版 chroot 环境
+#   2. 把内核模块拷入 chroot, 在 chroot 内用 dracut 生成 initramfs
+#   3. 把 initramfs 的 chroot 环境配置后打包成 rootfs
+#      (ext4 镜像 zstd 压缩 + tar.gz)
+#
+# 用法:
+#   initramfs-build <内核构建产物目录> [选项] [profile ...]
+#
+# 选项:
+#   openeuler    openEuler 24.03 LTS SP3 的 rva20 + rva23 两个 profile
+#   openruyi     openruyi 的 rva20 + rva23 两个 profile
+#   all          上面全部 4 个 profile (缺省值)
+#
+# 也可以直接指定具体 profile:
+#   openEuler-24.03-LTS-SP3-RVA20    openEuler 24.03 LTS SP3 rva20
+#   openEuler-24.03-LTS-SP3-RVA23    openEuler 24.03 LTS SP3 rva23
+#   openruyi-rva20                   openruyi rva20
+#   openruyi-rva23                   openruyi rva23
+#
+# 输出 (/srv/initramfs_result):
+#   <commit>/<profile>/initramfs.img                initramfs 及其 md5sum
+#   <commit>/<profile>/<profile>-rootfs.img.zst    ext4 镜像 zstd 压缩及 md5sum
+#   <commit>/<profile>/<profile>-rootfs.tar.gz     rootfs 压缩包及 md5sum
+#   (rootfs 内含配套内核模块)
+#
+# 运行要求:
+#   - 容器需 --privileged (bind 挂载 proc/sys/dev、loop 挂载制作 ext4 镜像)
+#   - 宿主机需注册 riscv64 的 binfmt_misc (chroot 内执行目标架构程序),
+#     例如: docker run --privileged --rm tonistiigi/binfmt --install riscv64
+
+set -euo pipefail
+
+RESULT_PATH=/srv/initramfs_result
+ALL_PROFILES=(
+    "openEuler-24.03-LTS-SP3-RVA20"
+    "openEuler-24.03-LTS-SP3-RVA23"
+    "openruyi-rva20"
+    "openruyi-rva23"
+)
+OPENEULER_PROFILES=(
+    "openEuler-24.03-LTS-SP3-RVA20"
+    "openEuler-24.03-LTS-SP3-RVA23"
+)
+OPENRUYI_PROFILES=(
+    "openruyi-rva20"
+    "openruyi-rva23"
+)
+
+# rootfs 通用配置
+ROOTFS_HOSTNAME="riscv64"
+ROOT_PASSWORD='openEuler12#$'
+NTP_SERVERS="ntp.aliyun.com ntp.tencent.com"
+FALLBACK_NTP="0.pool.ntp.org 1.pool.ntp.org"
+IMG_RESERVED_MB=5120
+
+# 当前 profile 的发行版配置(load_profile 填充)
+PROFILE_NAME=""
+REPO_ID=""
+REPO_URL=""
+RELEASEVER=""
+INSTALL_MODE=""
+INSTALL_TARGET=""
+EXTRA_PACKAGES=""
+DRACUT_ADD_DRIVERS=""
+
+# 挂载/临时文件状态(cleanup 用)
+CURRENT_ROOTFS_DIR=""
+TEMP_IMG=""
+TEMP_MOUNT_DIR=""
+
+# ============================================================================
+# 工具函数
+# ============================================================================
+
+retry() {
+    local max_attempts=$1; shift
+    local sleep_seconds=$1; shift
+    local n=1
+
+    while (( n <= max_attempts )); do
+        if "$@"; then
+            return 0
+        fi
+        echo "Attempt $n failed. Retrying in ${sleep_seconds} seconds..." >&2
+        ((n++))
+        sleep "$sleep_seconds"
+    done
+
+    echo "Command failed after ${max_attempts} attempts: $*" >&2
+    return 1
+}
+
+usage() {
+    cat <<EOF
+用法: $(basename "$0") <内核构建产物目录> [选项] [profile ...]
+
+内核构建产物目录: guix-kernel-cross-build 产物
+  (含 Image、lib/modules/<kver>、lib/dtb)
+
+选项 (选项和具体 profile 可混用、可多个):
+  openeuler    openEuler 24.03 LTS SP3 rva20 + rva23
+  openruyi     openruyi rva20 + rva23
+  all          全部 4 个 profile (缺省)
+
+具体 profile:
+EOF
+    local p
+    for p in "${ALL_PROFILES[@]}"; do
+        echo "  ${p}"
+    done
+}
+
+cleanup() {
+    if [ -n "${CURRENT_ROOTFS_DIR}" ] && [ -d "${CURRENT_ROOTFS_DIR}" ]; then
+        local m
+        for m in dev/pts dev/shm dev proc sys run; do
+            umount "${CURRENT_ROOTFS_DIR}/${m}" 2>/dev/null || true
+        done
+    fi
+    if [ -n "${TEMP_MOUNT_DIR}" ] && [ -d "${TEMP_MOUNT_DIR}" ]; then
+        umount "${TEMP_MOUNT_DIR}" 2>/dev/null || true
+        rmdir "${TEMP_MOUNT_DIR}" 2>/dev/null || true
+        TEMP_MOUNT_DIR=""
+    fi
+    if [ -n "${TEMP_IMG}" ]; then
+        rm -f "${TEMP_IMG}"
+        TEMP_IMG=""
+    fi
+}
+trap cleanup EXIT
+
+# ============================================================================
+# profile 配置
+# ============================================================================
+
+load_profile() {
+    PROFILE_NAME="$1"
+    case "${PROFILE_NAME}" in
+        openEuler-24.03-LTS-SP3-RVA20)
+            REPO_ID="openEuler-24.03-LTS-SP3-RVA20"
+            REPO_URL="https://fast-mirror.isrc.ac.cn/openeuler/openEuler-24.03-LTS-SP3/everything/riscv64/rva20/riscv64/"
+            RELEASEVER="openEuler-24.03-LTS-SP3"
+            INSTALL_MODE="group"
+            INSTALL_TARGET="minimal-environment"
+            EXTRA_PACKAGES="systemd-timesyncd dracut dracut-network nfs-utils"
+            DRACUT_ADD_DRIVERS=""
+            ;;
+        openEuler-24.03-LTS-SP3-RVA23)
+            REPO_ID="openEuler-24.03-LTS-SP3-RVA23"
+            REPO_URL="https://fast-mirror.isrc.ac.cn/openeuler/openEuler-24.03-LTS-SP3/everything/riscv64/rva23/riscv64/"
+            RELEASEVER="openEuler-24.03-LTS-SP3"
+            INSTALL_MODE="group"
+            INSTALL_TARGET="minimal-environment"
+            EXTRA_PACKAGES="systemd-timesyncd dracut dracut-network nfs-utils"
+            # rva23 附加 k1-emac 网卡驱动
+            DRACUT_ADD_DRIVERS="--add-drivers k1-emac"
+            ;;
+        openruyi-rva20|openruyi-rva23)
+            REPO_ID="${PROFILE_NAME}"
+            REPO_URL="https://boat.openruyi.cn/unstable/${PROFILE_NAME#openruyi-}"
+            RELEASEVER=""
+            INSTALL_MODE="package"
+            INSTALL_TARGET="openruyi-minimal"
+            EXTRA_PACKAGES="systemd-timesyncd systemd libseccomp NetworkManager dracut dracut-network nfs-client"
+            DRACUT_ADD_DRIVERS=""
+            ;;
+        *)
+            echo "错误: 不支持的 profile '${PROFILE_NAME}'"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+# ============================================================================
+# 构建步骤
+# ============================================================================
+
+mount_chroot() {
+    local rootfs_dir="$1"
+
+    mkdir -p "${rootfs_dir}"/dev/pts "${rootfs_dir}"/dev/shm
+    mount --bind /dev "${rootfs_dir}/dev"
+    mount --bind /dev/pts "${rootfs_dir}/dev/pts"
+    mount --bind /dev/shm "${rootfs_dir}/dev/shm"
+    mount --bind /run "${rootfs_dir}/run"
+    mount -t proc proc "${rootfs_dir}/proc"
+    mount -t sysfs sys "${rootfs_dir}/sys"
+}
+
+umount_chroot() {
+    local rootfs_dir="$1"
+    local m
+
+    for m in dev/pts dev/shm dev proc sys run; do
+        umount "${rootfs_dir}/${m}" 2>/dev/null || true
+    done
+}
+
+install_rootfs() {
+    local rootfs_dir="$1"
+    local releasever_args=()
+
+    if [ -n "${RELEASEVER}" ]; then
+        releasever_args=(--releasever "${RELEASEVER}")
+    fi
+
+    mkdir -p "${rootfs_dir}/etc/yum.repos.d"
+    cat > "${rootfs_dir}/etc/yum.repos.d/${REPO_ID}.repo" <<EOF
+[${REPO_ID}]
+name=${REPO_ID}
+baseurl=${REPO_URL}
+enabled=1
+gpgcheck=0
+EOF
+
+    echo "[${PROFILE_NAME}] 安装目标系统: ${INSTALL_TARGET} (模式: ${INSTALL_MODE})..."
+    if [ "${INSTALL_MODE}" = "group" ]; then
+        retry 10 30 dnf group install -y \
+            --disablerepo='*' --enablerepo="${REPO_ID}" \
+            --forcearch riscv64 --installroot "${rootfs_dir}" \
+            "${releasever_args[@]}" \
+            --nodocs --exclude='kernel*' \
+            "${INSTALL_TARGET}"
+    else
+        retry 10 30 dnf install -y \
+            --disablerepo='*' --enablerepo="${REPO_ID}" \
+            --forcearch riscv64 --installroot "${rootfs_dir}" \
+            "${releasever_args[@]}" \
+            --nodocs --exclude='kernel*' \
+            "${INSTALL_TARGET}"
+    fi
+
+    echo "[${PROFILE_NAME}] 安装额外软件包: ${EXTRA_PACKAGES}..."
+    # shellcheck disable=SC2086
+    retry 10 30 dnf install -y \
+        --disablerepo='*' --enablerepo="${REPO_ID}" \
+        --forcearch riscv64 --installroot "${rootfs_dir}" \
+        "${releasever_args[@]}" \
+        --nodocs \
+        ${EXTRA_PACKAGES}
+
+    # openruyi 需要(且仅当镜像内有 libudev-zero 时)替换为 systemd-udev
+    if [[ "${PROFILE_NAME}" == openruyi-* ]]; then
+        if rpm --root "${rootfs_dir}" -q libudev-zero >/dev/null 2>&1; then
+            echo "[${PROFILE_NAME}] 替换 libudev-zero 为 systemd-udev..."
+            retry 10 30 dnf swap -y \
+                --disablerepo='*' --enablerepo="${REPO_ID}" \
+                --forcearch riscv64 --installroot "${rootfs_dir}" \
+                libudev-zero systemd-udev
+        fi
+    fi
+}
+
+create_initramfs() {
+    local rootfs_dir="$1"
+
+    echo "[${PROFILE_NAME}] 拷入内核模块 (kver: ${KVER})..."
+    mkdir -p "${rootfs_dir}/lib/modules"
+    rsync -a "${ARTIFACT_DIR}/lib/modules/${KVER}" "${rootfs_dir}/lib/modules/"
+
+    echo "[${PROFILE_NAME}] 生成 initramfs (dracut)..."
+    chroot "${rootfs_dir}" depmod "${KVER}"
+    chroot "${rootfs_dir}" /bin/bash -c "dracut /root/initramfs.img --no-hostonly --add ' nfs network base ' ${DRACUT_ADD_DRIVERS} --kver ${KVER} && md5sum /root/initramfs.img > /root/initramfs.img.md5sum"
+}
+
+configure_rootfs() {
+    local rootfs_dir="$1"
+
+    echo "[${PROFILE_NAME}] 配置 rootfs..."
+
+    cat > "${rootfs_dir}/etc/fstab" << 'EOF'
+# /etc/fstab
+/dev/vda  /  ext4  defaults  0 1
+EOF
+
+    echo "${ROOTFS_HOSTNAME}" > "${rootfs_dir}/etc/hostname"
+
+    mkdir -p "${rootfs_dir}/etc/ssh"
+    {
+        echo "PasswordAuthentication yes"
+        echo "PermitRootLogin yes"
+    } >> "${rootfs_dir}/etc/ssh/sshd_config"
+
+    echo "root:${ROOT_PASSWORD}" | chroot "${rootfs_dir}" chpasswd
+
+    # openruyi 需要创建 systemd-resolve 用户并启动 NetworkManager
+    if [[ "${PROFILE_NAME}" == openruyi-* ]]; then
+        chroot "${rootfs_dir}" useradd -r -s /sbin/nologin systemd-resolve 2>/dev/null || true
+        chroot "${rootfs_dir}" systemctl enable NetworkManager.service 2>/dev/null || true
+    fi
+
+    cat > "${rootfs_dir}/etc/resolv.conf" << 'EOF'
+nameserver 223.5.5.5
+EOF
+
+    mkdir -p "${rootfs_dir}/etc/systemd"
+    cat > "${rootfs_dir}/etc/systemd/timesyncd.conf" << EOF
+[Time]
+NTP=${NTP_SERVERS}
+FallbackNTP=${FALLBACK_NTP}
+EOF
+    chroot "${rootfs_dir}" timedatectl set-ntp true 2>/dev/null || true
+    chroot "${rootfs_dir}" systemctl enable systemd-timesyncd.service 2>/dev/null || true
+}
+
+cleanup_rootfs() {
+    local rootfs_dir="$1"
+
+    # 清理包管理器缓存和构建过程残留
+    rm -rf "${rootfs_dir}/var/cache/dnf" "${rootfs_dir}/var/lib/dnf"
+    rm -f "${rootfs_dir}/var/log/yum.log" "${rootfs_dir}/var/log/dnf.rpm.log"
+    rm -f "${rootfs_dir}/root/initramfs.img" "${rootfs_dir}/root/initramfs.img.md5sum"
+}
+
+package_rootfs() {
+    local rootfs_dir="$1"
+    local out_dir="$2"
+
+    local rootfs_size
+    rootfs_size=$(du -sm "${rootfs_dir}" | cut -f1)
+    local img_size=$((rootfs_size + IMG_RESERVED_MB))
+    echo "[${PROFILE_NAME}] rootfs 大小: ${rootfs_size}MB, 镜像大小: ${img_size}MB (含 ${IMG_RESERVED_MB}MB 预留)"
+
+    echo "[${PROFILE_NAME}] 创建 ext4 镜像并压缩 (zstd)..."
+    TEMP_IMG=$(mktemp /tmp/rootfs-XXXXXX.img)
+    TEMP_MOUNT_DIR=$(mktemp -d /tmp/rootfs-mount-XXXX)
+
+    dd if=/dev/zero of="${TEMP_IMG}" bs=1M count="${img_size}" status=none
+    mkfs.ext4 -F "${TEMP_IMG}" >/dev/null
+
+    mount -o loop "${TEMP_IMG}" "${TEMP_MOUNT_DIR}"
+    cp -a "${rootfs_dir}/." "${TEMP_MOUNT_DIR}/"
+    sync
+    umount "${TEMP_MOUNT_DIR}"
+    rmdir "${TEMP_MOUNT_DIR}"
+    TEMP_MOUNT_DIR=""
+
+    zstd -f "${TEMP_IMG}" -o "${out_dir}/${PROFILE_NAME}-rootfs.img.zst"
+    rm -f "${TEMP_IMG}"
+    TEMP_IMG=""
+    md5sum "${out_dir}/${PROFILE_NAME}-rootfs.img.zst" > "${out_dir}/${PROFILE_NAME}-rootfs.img.zst.md5sum"
+    chmod 0644 "${out_dir}/${PROFILE_NAME}-rootfs.img.zst"*
+
+    echo "[${PROFILE_NAME}] 创建 tar.gz 压缩包..."
+    tar -czf "${out_dir}/${PROFILE_NAME}-rootfs.tar.gz" -C "${rootfs_dir}" .
+    md5sum "${out_dir}/${PROFILE_NAME}-rootfs.tar.gz" > "${out_dir}/${PROFILE_NAME}-rootfs.tar.gz.md5sum"
+    chmod 0644 "${out_dir}/${PROFILE_NAME}-rootfs.tar.gz"*
+}
+
+build_profile() {
+    load_profile "$1"
+
+    local profile_out="${OUT_ROOT}/${PROFILE_NAME}"
+    local rootfs_dir="${profile_out}/rootfs"
+
+    echo ""
+    echo "=========================================="
+    echo " 构建 profile: ${PROFILE_NAME}"
+    echo "=========================================="
+
+    rm -rf "${profile_out}"
+    mkdir -p "${rootfs_dir}"/{dev,proc,sys,run,etc/yum.repos.d,root,lib/modules}
+
+    CURRENT_ROOTFS_DIR="${rootfs_dir}"
+
+    echo "[1/5] 安装目标系统..."
+    mount_chroot "${rootfs_dir}"
+    install_rootfs "${rootfs_dir}"
+
+    echo "[2/5] 生成 initramfs..."
+    create_initramfs "${rootfs_dir}"
+    cp "${rootfs_dir}/root/initramfs.img" "${rootfs_dir}/root/initramfs.img.md5sum" "${profile_out}/"
+    chmod 0644 "${profile_out}/initramfs.img"
+
+    echo "[3/5] 配置并清理 rootfs..."
+    configure_rootfs "${rootfs_dir}"
+    cleanup_rootfs "${rootfs_dir}"
+    umount_chroot "${rootfs_dir}"
+    CURRENT_ROOTFS_DIR=""
+
+    echo "[4/5] 打包 rootfs 产物 (img.zst / tar.gz)..."
+    package_rootfs "${rootfs_dir}" "${profile_out}"
+
+    echo "[5/5] 清理 rootfs 工作目录..."
+    rm -rf "${rootfs_dir}"
+}
+
+# ============================================================================
+# 主流程
+# ============================================================================
+
+ARTIFACT_DIR="${1:-}"
+if [ -z "${ARTIFACT_DIR}" ] || [ ! -d "${ARTIFACT_DIR}" ]; then
+    echo "错误: 请传入 guix-kernel-cross-build 的内核构建产物目录"
+    usage
+    exit 1
+fi
+shift
+
+# 展开选项参数为具体 profile 列表
+#   openeuler → openEuler 两个 profile
+#   openruyi  → openruyi 两个 profile
+#   all       → 全部 4 个 (缺省)
+expand_profiles() {
+    local arg="$1"
+    case "${arg,,}" in
+        all)       echo "${ALL_PROFILES[@]}" ;;
+        openeuler) echo "${OPENEULER_PROFILES[@]}" ;;
+        openruyi)  echo "${OPENRUYI_PROFILES[@]}" ;;
+        *)         echo "${arg}" ;;
+    esac
+}
+
+PROFILES=()
+if [ $# -gt 0 ]; then
+    for arg in "$@"; do
+        for p in $(expand_profiles "${arg}"); do
+            # 校验是否为支持的 profile
+            ok=0
+            for ap in "${ALL_PROFILES[@]}"; do
+                if [ "${p}" = "${ap}" ]; then
+                    ok=1
+                fi
+            done
+            if [ "${ok}" -ne 1 ]; then
+                echo "错误: 不支持的 profile '${p}'"
+                usage
+                exit 1
+            fi
+            # 去重
+            dup=0
+            for ep in "${PROFILES[@]}"; do
+                if [ "${p}" = "${ep}" ]; then
+                    dup=1
+                fi
+            done
+            if [ "${dup}" -ne 1 ]; then
+                PROFILES+=("${p}")
+            fi
+        done
+    done
+else
+    PROFILES=("${ALL_PROFILES[@]}")
+fi
+
+# 校验构建产物目录
+if [ ! -f "${ARTIFACT_DIR}/Image" ]; then
+    echo "错误: ${ARTIFACT_DIR}/Image 不存在"
+    exit 1
+fi
+module_dirs=("${ARTIFACT_DIR}"/lib/modules/*)
+if [ ! -d "${module_dirs[0]}" ]; then
+    echo "错误: ${ARTIFACT_DIR}/lib/modules/ 下没有内核模块"
+    exit 1
+fi
+if [ "${#module_dirs[@]}" -ne 1 ]; then
+    echo "错误: ${ARTIFACT_DIR}/lib/modules/ 下应有且只有一个内核版本目录, 实际 ${#module_dirs[@]} 个"
+    exit 1
+fi
+KVER=$(basename "${module_dirs[0]}")
+COMMIT=$(basename "${ARTIFACT_DIR%/}")
+
+OUT_ROOT="${RESULT_PATH}/${COMMIT}"
+
+echo ""
+echo "=========================================="
+echo " initramfs / rootfs 构建"
+echo "=========================================="
+echo "构建产物目录: ${ARTIFACT_DIR}"
+echo "内核版本:     ${KVER}"
+echo "profile:      ${PROFILES[*]}"
+echo "输出目录:     ${OUT_ROOT}"
+echo ""
+
+rm -rf "${OUT_ROOT}"
+mkdir -p "${OUT_ROOT}"
+
+for profile in "${PROFILES[@]}"; do
+    build_profile "${profile}"
+done
+
+echo ""
+echo "=========================================="
+echo "构建产物在 ${OUT_ROOT}:"
+echo "=========================================="
+for profile_dir in "${OUT_ROOT}"/*/; do
+    if [ -d "${profile_dir}" ]; then
+        echo "--- $(basename "${profile_dir}") ---"
+        ls -lh "${profile_dir}"
+    fi
+done
+echo "Done!"
