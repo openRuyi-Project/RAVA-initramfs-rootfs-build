@@ -15,7 +15,7 @@ RUN if [ -f /etc/yum.repos.d/openruyi.repo ]; then \
 
 # install packages
 RUN dnf makecache && \
-    dnf install -y wget xz shadow dracut rsync git gpg tar ca-certificates zstd e2fsprogs util-linux && \
+    dnf install -y wget xz shadow dracut rsync git gpg tar tree ca-certificates zstd e2fsprogs util-linux && \
     dnf clean all
 
 # create result dir

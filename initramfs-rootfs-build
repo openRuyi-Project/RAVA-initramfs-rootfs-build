@@ -563,8 +563,8 @@ echo "构建产物在 ${OUT_ROOT}:"
 echo "=========================================="
 for profile_dir in "${OUT_ROOT}"/*/; do
     if [ -d "${profile_dir}" ]; then
-        echo "--- $(basename "${profile_dir}") ---"
-        ls -lh "${profile_dir}"
+        echo ""
+        (cd "${OUT_ROOT}" && tree "$(basename "${profile_dir}")")
     fi
 done
 echo "Done!"
